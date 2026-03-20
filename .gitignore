@@ -1,0 +1,39 @@
+# 数据文件（不上传）
+cqt_cache/
+vocal_mp3/
+*.npy
+*.mp3
+*.wav
+
+# 标注文件（数据集相关）
+MIR-ST500_corrected.json
+
+# 训练产物
+checkpoints/
+logs/
+*.pt
+*.pth
+train.log
+train_output.log
+nohup.out
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# 系统文件
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# 临时文件
+*.tmp
+*.bak
+/tmp/
