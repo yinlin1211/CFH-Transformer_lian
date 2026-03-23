@@ -7,7 +7,7 @@ MIR-ST500 数据集加载器（v2 — 对齐论文）
   - cqt_tensor shape: (F=288, T)，DataLoader 自动加 batch 维度
 
 训练模式：每个 __getitem__ 随机截取一段 segment_frames 帧的片段
-验证/测试模式：__getitem__ 返回整首歌的完整 CQT 和标签
+验证/测试模式：__getitem__ 返回整首歌的完整 CQT 和标签（不截断，对齐论文）
 """
 
 import torch
@@ -128,24 +128,15 @@ class MIR_ST500_Dataset(Dataset):
         return cqt_tensor, label_tensors
 
     def _get_full_song(self, idx):
-        """验证/测试：返回整首歌"""
+        """验证/测试：返回整首歌（完整 CQT，不截断）"""
         song_id = self.file_list[idx]
         cqt = np.load(str(self.cqt_cache_dir / f"{song_id}.npy"))
         num_frames = cqt.shape[1]
 
-        MAX_FRAMES = 4096
-        if num_frames > MAX_FRAMES:
-            start = (num_frames - MAX_FRAMES) // 4
-            num_frames = MAX_FRAMES
-            cqt = cqt[:, start:start + MAX_FRAMES]
-        else:
-            start = 0
-
-        labels = self._create_labels(song_id, cqt.shape[1] + start)
-        labels_seg = {k: v[start:start + cqt.shape[1]] for k, v in labels.items()}
+        labels = self._create_labels(song_id, num_frames)
 
         cqt_tensor = torch.from_numpy(cqt).float()
-        label_tensors = {k: torch.from_numpy(v).float() for k, v in labels_seg.items()}
+        label_tensors = {k: torch.from_numpy(v).float() for k, v in labels.items()}
         return cqt_tensor, label_tensors, song_id
 
     def _create_labels(self, song_id, num_frames):

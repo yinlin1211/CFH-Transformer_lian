@@ -6,6 +6,7 @@ CFT v2 训练脚本 — 严格对齐论文
   - 标准 BCE 损失，均等权重
   - 音高范围 N=48（C2~B5，MIDI 36~83）
   - 全曲验证 + 音符级 F1 评估
+  - 优化器修正：AdamW → Adam（对齐论文 Section 3.3）
 """
 
 import argparse
@@ -16,7 +17,7 @@ import random
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.optim import AdamW
+from torch.optim import Adam
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader
 from pathlib import Path
@@ -433,11 +434,10 @@ def main():
     # 损失函数（标准 BCE，均等权重）
     criterion = CFTLoss().to(device)
 
-    # 优化器
-    optimizer = AdamW(
+    # 优化器（论文 Section 3.3：使用标准 Adam）
+    optimizer = Adam(
         model.parameters(),
-        lr=config['training']['learning_rate'],
-        weight_decay=config['training']['weight_decay']
+        lr=config['training']['learning_rate']
     )
 
     # 学习率调度：warmup + cosine annealing
