@@ -19,6 +19,27 @@
 | 原始实现 | 944,048 |
 | 修正版（本仓库） | 2,403,664 |
 
+## 训练结果
+
+训练共进行 **300 个 Epoch**，在 MIR-ST500 测试集（100 首歌曲）上的最终评估结果如下：
+
+| 指标 | 验证集最优 | 测试集 |
+|------|-----------|--------|
+| **COn F1**（音符起始） | — | **0.6585** |
+| **COnP F1**（起始+音高） | **0.6860** | **0.6756** |
+| **COnPOff F1**（起始+音高+结束） | — | **0.4192** |
+
+> 评估阈值：onset_thresh = 0.10，frame_thresh = 0.35（训练过程中通过 threshold search 自动确定最优值）
+
+### 训练曲线
+
+![CFT Training Curves](training_curves.png)
+
+训练曲线显示：
+- **Loss**：训练损失与验证损失高度吻合，无明显过拟合，收敛稳定
+- **F1 指标**：COnP F1 在约 Epoch 100 后趋于平稳，最优值出现在 Epoch 209（COnP = 0.6860）
+- **学习率**：采用 LinearWarmup(10 epochs) + CosineAnnealing 调度策略
+
 ## 环境要求
 
 ```
@@ -62,8 +83,16 @@ python train.py --resume checkpoints/latest.pt
 
 ## 评估
 
+使用原始音频评估：
+
 ```bash
 python evaluate.py --config config.yaml --checkpoint checkpoints/best_model.pt --split test
+```
+
+使用预计算 CQT（npy）评估（更快）：
+
+```bash
+python evaluate_npy.py --config config.yaml --checkpoint checkpoints/best_model.pt --split test --onset_thresh 0.10 --frame_thresh 0.35
 ```
 
 ## 训练配置
@@ -82,15 +111,18 @@ python evaluate.py --config config.yaml --checkpoint checkpoints/best_model.pt -
 ## 代码结构
 
 ```
-├── model_v2.py          # CFT 模型（修正版，本仓库主要贡献）
-├── model_v2_backup.py   # 原始模型（对照用）
-├── train.py             # 训练脚本
-├── dataset.py           # 数据集加载
-├── evaluate.py          # 测试集评估
-├── prepare_splits.py    # 数据集划分
+├── model_v2.py              # CFT 模型（修正版，本仓库主要贡献）
+├── model_v2_backup.py       # 原始模型（对照用）
+├── train.py                 # 训练脚本
+├── dataset.py               # 数据集加载
+├── evaluate.py              # 测试集评估（原始音频版）
+├── evaluate_npy.py          # 测试集评估（预计算 npy 版，更快）
+├── prepare_splits.py        # 数据集划分
 ├── precompute_cqt_paper.py  # CQT 预计算
-├── config.yaml          # 训练配置
-└── splits/              # 数据集划分文件
+├── config.yaml              # 训练配置
+├── eval_results.json        # 测试集评估结果（逐曲目）
+├── training_curves.png      # 训练曲线图（Epoch 1~300）
+└── splits/                  # 数据集划分文件
     ├── train.txt
     ├── val.txt
     └── test.txt
