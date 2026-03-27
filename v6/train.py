@@ -65,15 +65,15 @@ def set_seed(seed=42):
     torch.backends.cudnn.benchmark = False
 
 
-def setup_logger(log_dir):
-    log_dir = Path(log_dir)
-    log_dir.mkdir(parents=True, exist_ok=True)
+def setup_logger(run_dir):
+    run_dir = Path(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s [%(levelname)s] %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S',
         handlers=[
-            logging.FileHandler(log_dir / 'train_stdout.log', mode='a'),
+            logging.FileHandler(run_dir / 'train_stdout.log', mode='a'),
             logging.StreamHandler(sys.stdout)
         ]
     )
@@ -451,15 +451,24 @@ def main():
         config = yaml.safe_load(f)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    save_dir = Path(config['training']['save_dir'])
-    log_dir = Path(config['training']['log_dir'])
+
+    # 按启动时间生成独立 run 目录，格式：run/<时间戳>_COnP/
+    # 每次启动都会创建全新子目录，多个进程并发训练时互不干扰
+    run_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    run_name = f"{run_timestamp}_COnP"
+    run_base = Path(config['training'].get('run_dir', './run'))
+    run_dir = run_base / run_name
+    save_dir = run_dir / 'checkpoints'
+    log_dir  = run_dir / 'logs'
+    run_dir.mkdir(parents=True, exist_ok=True)
     save_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    pid_file = Path('/tmp/cft_v6_train.pid')
+    pid_file = Path(f'/tmp/cft_v6_COnP_{run_timestamp}.pid')
     pid_file.write_text(str(os.getpid()))
 
     logger = setup_logger(log_dir)
+    logger.info(f"Run directory: {run_dir}")
     logger.info(f"Device: {device}")
     logger.info(f"Config: {config}")
     logger.info("=" * 60)
@@ -521,7 +530,7 @@ def main():
 
     writer = None
     if HAS_TB:
-        writer = SummaryWriter(log_dir / datetime.now().strftime('%Y%m%d_%H%M%S'))
+        writer = SummaryWriter(str(log_dir / 'tensorboard'))
 
     start_epoch = 1
     best_conp_f1 = 0.0
@@ -624,6 +633,7 @@ def main():
 
     logger.info(f"Training complete! Best COnP_f1: {best_conp_f1:.4f}")
     pid_file.unlink(missing_ok=True)
+    logger.info(f"Run directory: {run_dir}")
 
 
 if __name__ == '__main__':

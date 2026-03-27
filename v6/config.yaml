@@ -52,8 +52,19 @@ training:
   num_workers: 4
   learning_rate: 0.0003   # 论文 Section 3.3：lr = 3e-4
   epochs: 1300            # 由 Fig.4 推算：160k iterations / 125 steps/epoch ≈ 1280
-  save_dir: './checkpoints_v6'
-  log_dir: './logs_v6'
+  # run_dir: 所有训练 run 的根目录，每次启动自动在此下创建 <时间戳>_<脚本名>/ 子目录
+  # 目录结构示例：
+  #   run/
+  #     20260327_143000_COnP/   <- train.py 启动的 run
+  #       checkpoints/          <- best_model.pt, checkpoint_epoch*.pt, latest.pt
+  #       logs/                 <- train_stdout.log, tensorboard/
+  #     20260327_145500_COn/    <- train_COn.py 启动的 run
+  #       checkpoints/
+  #       logs/
+  #     20260327_150000_val/    <- train_val.py 启动的 run
+  #       checkpoints/
+  #       logs/
+  run_dir: './run'
   save_every: 50
   grad_clip: 1.0          # 论文未提及，保留工程稳定性
   warmup_epochs: 0        # 论文未提及 warmup，v2 版本去掉 warmup
