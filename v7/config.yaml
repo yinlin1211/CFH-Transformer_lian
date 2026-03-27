@@ -1,0 +1,75 @@
+# CFH-Transformer v6 配置文件
+# 论文严格对齐版 — 修复三个 Transformer 的位置编码语义错误
+#
+# 论文 Section 3.3 明确说明的超参数：
+#   - batch_size: 16
+#   - optimizer: Adam（不是 AdamW）
+#   - learning_rate: 3e-4
+#   - 输入音频重采样至 16 kHz
+#   - 288-bin CQT（G1~F7，72 semitones × 4 bins/semitone）
+#   - kernel size: (4, 3/5/7, 3) ∈ (octave, pitch_class, time)
+#   - 6 octaves
+#   - 每个 Transformer 只用 1 个 encoder layer
+#   - 训练集：MIR-ST500 前 400 首
+#
+# 论文未明确说明、本版本的处理方式：
+#   - epochs: 1300（由 Fig.4 X轴 160k iterations 推算，400首×约125步/epoch）
+#   - lr_scheduler: 论文未提及，本版本不加 warmup，直接 cosine decay（更接近论文）
+#   - grad_clip: 论文未提及，保留 1.0（工程稳定性）
+#   - AMP: 论文未提及，保留（V100 硬件适配）
+#   - num_cycles M: 论文未明确，保持 2
+
+data:
+  audio_dir: '/mnt/ssd/lian/论文复现/CFH-Transformer/vocal_mp3/'
+  label_path: '/mnt/ssd/lian/论文复现/CFH-Transformer/MIR-ST500_corrected.json'
+  splits_dir: /mnt/ssd/lian/论文复现/CFH-Transformer_v3/splits/
+  cqt_cache_dir: '/mnt/ssd/lian/论文复现/CFH-Transformer/cqt_cache/npy/'
+  sample_rate: 16000
+  segment_frames: 256
+  max_samples_per_epoch: 2000
+
+audio:
+  hop_length: 320
+  cqt_bins: 288           # 论文：288-bin CQT，G1~F7
+  bins_per_octave: 48     # 论文：72 semitones × 4 bins = 288，每 octave 48 bins
+  n_octaves: 6            # 论文：6 octaves
+  fmin: 48.9994           # G1 频率
+
+model:
+  h_dim: 128
+  conv_channels: 32
+  num_cycles: 2           # 论文未明确，保持 2
+  num_transformer_layers: 1   # 论文 Section 3.3：每个 Transformer 只用 1 个 encoder layer
+  nhead_fh: 8
+  nhead_ht: 8
+  nhead_tf: 6
+  dim_feedforward: 512
+  dropout: 0.1
+  num_pitches: 48         # 论文音高范围 C2~B5，MIDI 36~83
+
+training:
+  batch_size: 16          # 论文 Section 3.3：batch size = 16
+  num_workers: 4
+  learning_rate: 0.0003   # 论文 Section 3.3：lr = 3e-4
+  epochs: 1300            # 由 Fig.4 推算：160k iterations / 125 steps/epoch ≈ 1280
+  # run_dir: 所有训练 run 的根目录，每次启动自动在此下创建 <时间戳>_<脚本名>/ 子目录
+  # 目录结构示例：
+  #   run/
+  #     20260327_143000_COnP/   <- train.py 启动的 run
+  #       checkpoints/          <- best_model.pt, checkpoint_epoch*.pt, latest.pt
+  #       logs/                 <- train_stdout.log, tensorboard/
+  #     20260327_145500_COn/    <- train_COn.py 启动的 run
+  #       checkpoints/
+  #       logs/
+  #     20260327_150000_val/    <- train_val.py 启动的 run
+  #       checkpoints/
+  #       logs/
+  run_dir: './run'
+  save_every: 50
+  grad_clip: 1.0          # 论文未提及，保留工程稳定性
+  warmup_epochs: 0        # 论文未提及 warmup，v2 版本去掉 warmup
+
+loss:
+  onset_weight: 1.0       # 论文公式(1)：均等权重
+  offset_weight: 1.0
+  frame_weight: 1.0
