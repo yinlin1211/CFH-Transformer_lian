@@ -178,8 +178,15 @@ class FHTransformer(nn.Module):
         B, T, F, H = S.shape
         
         # 1. 加 temporal embedding (公式2)
-        t_idx = torch.arange(T, device=S.device)
-        t_emb = self.temporal_embed(t_idx)  # (T, H)
+        if T <= self.temporal_embed.num_embeddings:
+            t_idx = torch.arange(T, device=S.device)
+            t_emb = self.temporal_embed(t_idx)  # (T, H)
+        else:
+            # 超出预设长度时使用线性插值扩展
+            t_emb_all = self.temporal_embed.weight.unsqueeze(0).transpose(1, 2) # (1, H, max_T)
+            t_emb = F_func.interpolate(t_emb_all, size=T, mode='linear', align_corners=False)
+            t_emb = t_emb.squeeze(0).transpose(0, 1) # (T, H)
+            
         # 广播加到 S: (B, T, F, H) + (1, T, 1, H)
         S = S + t_emb.unsqueeze(0).unsqueeze(2)
         

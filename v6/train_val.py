@@ -48,7 +48,7 @@ try:
 except ImportError:
     HAS_TB = False
 
-from model_v2 import CFT_v2, CFTLoss
+from model import CFT_v6 as CFT_v2, CFTLoss
 from dataset import MIR_ST500_Dataset, MIDI_MIN, NUM_PITCHES
 
 

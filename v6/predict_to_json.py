@@ -30,9 +30,9 @@ import numpy as np
 import torch
 import yaml
 
-# 关键：优先加载本目录的 model_v2.py（PaperHarmConvBlock / branches）
+# 关键：优先加载本目录的 model.py
 sys.path.insert(0, str(Path(__file__).parent))
-from model_v2 import CFT_v2 as CFT
+from model import CFT_v6 as CFT
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
 log = logging.getLogger(__name__)
