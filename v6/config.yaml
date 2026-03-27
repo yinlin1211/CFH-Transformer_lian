@@ -1,5 +1,5 @@
-# CFH-Transformer v2 配置文件
-# 论文对齐版 — 与原 CFH-Transformer 目录完全独立
+# CFH-Transformer v6 配置文件
+# 论文严格对齐版 — 修复三个 Transformer 的位置编码语义错误
 #
 # 论文 Section 3.3 明确说明的超参数：
 #   - batch_size: 16
@@ -52,8 +52,8 @@ training:
   num_workers: 4
   learning_rate: 0.0003   # 论文 Section 3.3：lr = 3e-4
   epochs: 1300            # 由 Fig.4 推算：160k iterations / 125 steps/epoch ≈ 1280
-  save_dir: './checkpoints_v3'
-  log_dir: './logs_v3'
+  save_dir: './checkpoints_v6'
+  log_dir: './logs_v6'
   save_every: 50
   grad_clip: 1.0          # 论文未提及，保留工程稳定性
   warmup_epochs: 0        # 论文未提及 warmup，v2 版本去掉 warmup

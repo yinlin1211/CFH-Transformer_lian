@@ -1,19 +1,20 @@
 """
-CFT v3 训练脚本 — 评估代码修正版
+CFT v6 训练脚本 — 修复 Transformer PE 语义错误版
 ==============================
 
-在 v2 基础上的修正（v3）：
-  [修正1] frames_to_notes 的 onset 分支允许 2 帧间隙，避免长音符被抖动截断
-  [修正2] compute_note_f1_single 改用 transcription.evaluate() 一次调用：
-             - pitch 转 Hz（原来直接用 MIDI 编号导致 pitch 距离计算错误）
-             - COn = Onset_F-measure（只看 onset，不看 pitch）
-             - COnP = F-measure_no_offset（onset + pitch）
-             - COnPOff = F-measure（onset + pitch + offset）
-  [修正3] ref 直接从 JSON 标注读取，不再从帧标签反推
+基于 v5 的核心修复：
+  [修复1] FH Transformer 加入 temporal_embed（论文公式2：ε(t)）
+  [修复2] HT Transformer 加入 freq_embed（论文公式3：H(f)）
+  [修复3] TF Transformer 加入 harm_embed（论文公式4：T(h)）
+  [修复4] dataset.py 加入 15% 负样本
 
-继承自 v2 的设置：
-  - 无 warmup，直接 CosineAnnealingLR
-  - 默认读取 v3 目录下的 config.yaml
+评估逻辑（继承自 v3）：
+  - frames_to_notes 的 onset 分支允许 2 帧间隙
+  - compute_note_f1_single 使用 mir_eval transcription.evaluate()
+  - pitch 转 Hz，onset_tolerance=50ms，pitch_tolerance=50cents
+  - ref 直接从 JSON 标注读取
+
+调度器：CosineAnnealingLR（无 warmup）
 """
 
 import argparse

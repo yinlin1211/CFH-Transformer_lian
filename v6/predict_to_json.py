@@ -1,5 +1,5 @@
 """
-CFT_v2 推理脚本：将模型预测结果输出为 JSON 文件
+CFT_v6 推理脚本：将模型预测结果输出为 JSON 文件
 输出格式与原论文 evaluate_github.py 完全兼容：
   {"401": [[onset_sec, offset_sec, midi_pitch], ...], "402": [...], ...}
 
@@ -125,7 +125,7 @@ def predict_from_npy(model, npy_path, config, device):
                 pad = segment_frames - seg.shape[2]
                 seg = torch.nn.functional.pad(seg, (0, pad), value=-80.0)
 
-            # CFT_v2.forward 返回 (onset, frame, offset)，各 (B, T, 48)
+            # CFT_v6.forward 返回 (onset, frame, offset)，各 (B, T, 48)
             onset_logit, frame_logit, _ = model(seg)
             onset_prob = torch.sigmoid(onset_logit[0]).cpu().numpy()  # (seg, 48)
             frame_prob = torch.sigmoid(frame_logit[0]).cpu().numpy()
@@ -147,7 +147,7 @@ def predict_from_npy(model, npy_path, config, device):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='CFT_v2 推理：输出与原论文 evaluate_github.py 兼容的预测 JSON')
+        description='CFT_v6 推理：输出与原论文 evaluate_github.py 兼容的预测 JSON')
     parser.add_argument('--config',       type=str, default='config.yaml')
     parser.add_argument('--checkpoint',   type=str, required=True,
                         help='模型 checkpoint 路径')
@@ -168,7 +168,7 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     log.info(f'Device: {device}')
 
-    # 加载模型（使用本目录的 model_v2.py / CFT_v2 / PaperHarmConvBlock）
+    # 加载模型（使用本目录的 model.py / CFT_v6 / PaperHarmConvBlock）
     model = CFT(config).to(device)
     ckpt = torch.load(args.checkpoint, map_location=device)
     model.load_state_dict(ckpt['model_state_dict'])
