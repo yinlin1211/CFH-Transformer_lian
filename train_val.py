@@ -1,5 +1,5 @@
 """
-CFT v3 训练脚本 — 评估代码修正版
+CFT v3 训练脚本 — 评估代码修正版（最佳模型选择：val loss 最小）
 ==============================
 
 在 v2 基础上的修正（v3）：
@@ -10,6 +10,7 @@ CFT v3 训练脚本 — 评估代码修正版
              - COnP = F-measure_no_offset（onset + pitch）
              - COnPOff = F-measure（onset + pitch + offset）
   [修正3] ref 直接从 JSON 标注读取，不再从帧标签反推
+  [变体] 最佳模型选择标准：val loss 最小（不依赖后处理閘値）
 
 继承自 v2 的设置：
   - 无 warmup，直接 CosineAnnealingLR
@@ -523,7 +524,7 @@ def main():
         writer = SummaryWriter(log_dir / datetime.now().strftime('%Y%m%d_%H%M%S'))
 
     start_epoch = 1
-    best_conp_f1 = 0.0
+    best_val_loss = float('inf')
     best_onset_thresh = 0.3
     best_frame_thresh = 0.3
 
@@ -535,10 +536,10 @@ def main():
         if scaler is not None and 'scaler_state_dict' in ckpt:
             scaler.load_state_dict(ckpt['scaler_state_dict'])
         start_epoch = ckpt['epoch'] + 1
-        best_conp_f1 = ckpt.get('best_conp_f1', 0.0)
+        best_val_loss = ckpt.get('best_val_loss', float('inf'))
         best_onset_thresh = ckpt.get('best_onset_thresh', 0.3)
         best_frame_thresh = ckpt.get('best_frame_thresh', 0.3)
-        logger.info(f"Resumed from epoch {ckpt['epoch']}, best_COnP_f1={best_conp_f1:.4f}")
+        logger.info(f"Resumed from epoch {ckpt['epoch']}, best_val_loss={best_val_loss:.4f}")
 
     hop_length = config['audio']['hop_length']
     sample_rate = config['data']['sample_rate']
@@ -607,11 +608,11 @@ def main():
             'config': config
         }
 
-        if conp_f1 > best_conp_f1:
-            best_conp_f1 = conp_f1
-            ckpt['best_conp_f1'] = best_conp_f1
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            ckpt['best_val_loss'] = best_val_loss
             torch.save(ckpt, save_dir / 'best_model.pt')
-            logger.info(f"  -> Best model saved! COnP_f1={best_conp_f1:.4f}")
+            logger.info(f"  -> Best model saved! val_loss={best_val_loss:.4f}")
 
         if epoch % config['training']['save_every'] == 0:
             torch.save(ckpt, save_dir / f'checkpoint_epoch{epoch:04d}.pt')
@@ -621,7 +622,7 @@ def main():
     if writer:
         writer.close()
 
-    logger.info(f"Training complete! Best COnP_f1: {best_conp_f1:.4f}")
+    logger.info(f"Training complete! Best val_loss: {best_val_loss:.4f}")
     pid_file.unlink(missing_ok=True)
 
 
