@@ -25,7 +25,11 @@ NUM_PITCHES = MIDI_MAX - MIDI_MIN + 1  # 48
 
 
 class MIR_ST500_Dataset(Dataset):
-    def __init__(self, config, split="train"):
+    def __init__(self, config, split="train", extra_splits=None):
+        """
+        extra_splits: 训练时额外合并的 split 列表（如 ['val']），用于将 val.txt 的40首
+                      并入训练，对齐论文使用400首训练的设置。仅当 split='train' 时生效。
+        """
         self.config = config
         self.split = split
         self.cqt_cache_dir = Path(config["data"]["cqt_cache_dir"])
@@ -41,6 +45,28 @@ class MIR_ST500_Dataset(Dataset):
         split_file = self.splits_dir / f"{split}.txt"
         with open(split_file, "r") as f:
             self.file_list = [line.strip() for line in f if line.strip()]
+
+        # 论文对齐：训练时合并额外split（如train+val=400首）
+        # 论文原文 Section 3.1："we use the same 400 songs of MIR-ST500 for training"
+        if split == "train" and extra_splits:
+            for extra_split in extra_splits:
+                extra_file = self.splits_dir / f"{extra_split}.txt"
+                if extra_file.exists():
+                    with open(extra_file, "r") as f:
+                        extra_ids = [line.strip() for line in f if line.strip()]
+                    self.file_list.extend(extra_ids)
+                else:
+                    print(f"Warning: extra split file not found: {extra_file}")
+            # 去重，保持顺序
+            seen = set()
+            deduped = []
+            for sid in self.file_list:
+                if sid not in seen:
+                    seen.add(sid)
+                    deduped.append(sid)
+            self.file_list = deduped
+            print(f"[Dataset] Training with {len(self.file_list)} songs "
+                  f"(base={split}, extra={extra_splits})")
 
         # 过滤掉没有缓存文件的歌曲
         valid = []

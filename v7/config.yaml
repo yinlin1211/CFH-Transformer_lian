@@ -27,6 +27,10 @@ data:
   sample_rate: 16000
   segment_frames: 256
   max_samples_per_epoch: 2000
+  # 论文对齐：将 val.txt (40首) 并入训练，实现论文说的400首训练
+  # 论文 Section 3.1："we use the same 400 songs of MIR-ST500 for training"
+  # 设为 null 则只用 train.txt (360首)；设为 ['val'] 则 train+val=400首
+  extra_train_splits: ['val']
 
 audio:
   hop_length: 320

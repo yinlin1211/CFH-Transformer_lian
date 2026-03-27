@@ -254,14 +254,36 @@ def train_epoch(model, loader, criterion, optimizer, device, epoch, logger,
 # 验证（全曲评估）
 # ---------------------------------------------------------------------------
 
+def infer_full_song(model, cqt_np, device, infer_chunk=256):
+    """50% 重叠推理（与 predict_to_json.py 对齐）。"""
+    T_total = cqt_np.shape[1]
+    step = infer_chunk // 2
+    onset_map = np.zeros((T_total, 48), dtype=np.float32)
+    frame_map  = np.zeros((T_total, 48), dtype=np.float32)
+    count_map  = np.zeros(T_total,       dtype=np.float32)
+    cqt_t = torch.from_numpy(cqt_np).float().unsqueeze(0)
+    with torch.no_grad():
+        for start in range(0, T_total, step):
+            end = start + infer_chunk
+            seg = cqt_t[:, :, start:min(end, T_total)]
+            chunk_T = seg.shape[2]
+            if chunk_T < infer_chunk:
+                seg = torch.nn.functional.pad(seg, (0, infer_chunk - chunk_T))
+            onset_logit, frame_logit, _ = model(seg.to(device))
+            onset_prob = torch.sigmoid(onset_logit[0, :chunk_T]).cpu().numpy()
+            frame_prob = torch.sigmoid(frame_logit[0, :chunk_T]).cpu().numpy()
+            actual_end = start + chunk_T
+            onset_map[start:actual_end] += onset_prob
+            frame_map[start:actual_end]  += frame_prob
+            count_map[start:actual_end]  += 1
+    count_map = np.maximum(count_map, 1)
+    return onset_map / count_map[:, np.newaxis], frame_map / count_map[:, np.newaxis]
+
+
 def validate_full_song(model, val_dataset, criterion, device, hop_length, sample_rate,
                        onset_thresh=0.5, frame_thresh=0.5, infer_chunk=256,
                        gt_annotations=None):
-    """
-    全曲验证。
-    gt_annotations: dict {song_id: [[onset, offset, midi], ...]}，用于 ref 音符。
-    如果为 None，则从帧标签反推（不推荐）。
-    """
+    """全曲验证（50% 重叠推理）。"""
     model.eval()
     total_loss = 0.0
     n_songs = 0
@@ -276,56 +298,43 @@ def validate_full_song(model, val_dataset, criterion, device, hop_length, sample
             cqt, labels, song_id = val_dataset[idx]
             F_bins, T_total = cqt.shape
 
-            onset_lbl = labels['onset'].numpy()
-            frame_lbl = labels['frame'].numpy()
+            onset_lbl  = labels['onset'].numpy()
+            frame_lbl  = labels['frame'].numpy()
             offset_lbl = labels['offset'].numpy()
 
-            onset_sig_chunks = []
-            frame_sig_chunks = []
-            offset_sig_chunks = []
+            # 损失：非重叠分块（监控用）
             chunk_losses = []
-
             for start in range(0, T_total, infer_chunk):
                 end = min(start + infer_chunk, T_total)
-                cqt_chunk = cqt[:, start:end].unsqueeze(0).to(device)
-
                 chunk_T = end - start
+                cqt_chunk = cqt[:, start:end].unsqueeze(0).to(device)
                 if chunk_T < infer_chunk:
-                    pad_len = infer_chunk - chunk_T
-                    cqt_chunk = torch.nn.functional.pad(cqt_chunk, (0, pad_len))
-
-                onset_pred, frame_pred, offset_pred = model(cqt_chunk)
-
-                onset_pred = onset_pred[:, :chunk_T, :]
-                frame_pred = frame_pred[:, :chunk_T, :]
-                offset_pred = offset_pred[:, :chunk_T, :]
-
-                ol_chunk = torch.from_numpy(onset_lbl[start:end]).unsqueeze(0).to(device)
-                fl_chunk = torch.from_numpy(frame_lbl[start:end]).unsqueeze(0).to(device)
-                ofl_chunk = torch.from_numpy(offset_lbl[start:end]).unsqueeze(0).to(device)
-                loss, _, _, _ = criterion(onset_pred, frame_pred, offset_pred,
-                                          ol_chunk, fl_chunk, ofl_chunk)
+                    cqt_chunk = torch.nn.functional.pad(cqt_chunk, (0, infer_chunk - chunk_T))
+                op, fp, ofp = model(cqt_chunk)
+                op  = op[:, :chunk_T, :]
+                fp  = fp[:, :chunk_T, :]
+                ofp = ofp[:, :chunk_T, :]
+                ol  = torch.from_numpy(onset_lbl[start:end]).unsqueeze(0).to(device)
+                fl  = torch.from_numpy(frame_lbl[start:end]).unsqueeze(0).to(device)
+                ofl = torch.from_numpy(offset_lbl[start:end]).unsqueeze(0).to(device)
+                loss, _, _, _ = criterion(op, fp, ofp, ol, fl, ofl)
                 chunk_losses.append(loss.item())
-
-                onset_sig_chunks.append(torch.sigmoid(onset_pred[0]).cpu().numpy())
-                frame_sig_chunks.append(torch.sigmoid(frame_pred[0]).cpu().numpy())
-                offset_sig_chunks.append(torch.sigmoid(offset_pred[0]).cpu().numpy())
-
-            onset_sig = np.concatenate(onset_sig_chunks, axis=0)
-            frame_sig = np.concatenate(frame_sig_chunks, axis=0)
 
             total_loss += float(np.mean(chunk_losses))
             n_songs += 1
 
+            # F1：50% 重叠推理
+            onset_sig, frame_sig = infer_full_song(
+                model, cqt.numpy(), device, infer_chunk=infer_chunk
+            )
+
             onset_sig_list.append(onset_sig.mean())
             frame_sig_list.append(frame_sig.mean())
 
-            # 预测音符
             pred_intervals, pred_pitches = frames_to_notes(
                 frame_sig, onset_sig, hop_length, sample_rate, onset_thresh, frame_thresh
             )
 
-            # ref 音符：优先从 JSON 标注读取，否则从帧标签反推
             if gt_annotations is not None and song_id in gt_annotations:
                 raw = gt_annotations[song_id]
                 ref_notes = [[float(n[0]), float(n[1]), float(n[2])] for n in raw
@@ -335,7 +344,6 @@ def validate_full_song(model, val_dataset, criterion, device, hop_length, sample
                 ref_intervals = np.array([[n[0], n[1]] for n in ref_notes])
                 ref_pitches   = np.array([n[2] for n in ref_notes])
             else:
-                # 备用：从帧标签反推（不推荐，仅当没有 JSON 时使用）
                 ref_intervals, ref_pitches = frames_to_notes(
                     frame_lbl.astype(np.float32), onset_lbl.astype(np.float32),
                     hop_length, sample_rate, onset_thresh=0.5, frame_thresh=0.5
@@ -353,12 +361,12 @@ def validate_full_song(model, val_dataset, criterion, device, hop_length, sample
                 conp_f1_list.append(conp_f1)
                 conpoff_f1_list.append(conpoff_f1)
 
-    avg_loss = total_loss / max(n_songs, 1)
-    avg_con_f1 = float(np.mean(con_f1_list)) if con_f1_list else 0.0
-    avg_conp_f1 = float(np.mean(conp_f1_list)) if conp_f1_list else 0.0
+    avg_loss       = total_loss / max(n_songs, 1)
+    avg_con_f1     = float(np.mean(con_f1_list))     if con_f1_list     else 0.0
+    avg_conp_f1    = float(np.mean(conp_f1_list))    if conp_f1_list    else 0.0
     avg_conpoff_f1 = float(np.mean(conpoff_f1_list)) if conpoff_f1_list else 0.0
-    avg_onset_sig = float(np.mean(onset_sig_list)) if onset_sig_list else 0.0
-    avg_frame_sig = float(np.mean(frame_sig_list)) if frame_sig_list else 0.0
+    avg_onset_sig  = float(np.mean(onset_sig_list))  if onset_sig_list  else 0.0
+    avg_frame_sig  = float(np.mean(frame_sig_list))  if frame_sig_list  else 0.0
 
     return avg_loss, avg_con_f1, avg_conp_f1, avg_conpoff_f1, avg_onset_sig, avg_frame_sig
 
@@ -375,21 +383,12 @@ def find_best_threshold(model, val_dataset, criterion, device, hop_length, sampl
     with torch.no_grad():
         for idx in range(n_search):
             cqt, labels, song_id = val_dataset[idx]
-            T_total = cqt.shape[1]
-            onset_chunks, frame_chunks = [], []
-            for start in range(0, T_total, infer_chunk):
-                end = min(start + infer_chunk, T_total)
-                chunk_T = end - start
-                cqt_chunk = cqt[:, start:end].unsqueeze(0).to(device)
-                if chunk_T < infer_chunk:
-                    cqt_chunk = torch.nn.functional.pad(cqt_chunk, (0, infer_chunk - chunk_T))
-                op, fp, _ = model(cqt_chunk)
-                onset_chunks.append(torch.sigmoid(op[0, :chunk_T]).cpu().numpy())
-                frame_chunks.append(torch.sigmoid(fp[0, :chunk_T]).cpu().numpy())
-            onset_sig = np.concatenate(onset_chunks, axis=0)
-            frame_sig = np.concatenate(frame_chunks, axis=0)
 
-            # ref 音符：优先从 JSON 标注读取
+            # 50% 重叠推理
+            onset_sig, frame_sig = infer_full_song(
+                model, cqt.numpy(), device, infer_chunk=infer_chunk
+            )
+
             if gt_annotations is not None and song_id in gt_annotations:
                 raw = gt_annotations[song_id]
                 ref_notes = [[float(n[0]), float(n[1]), float(n[2])] for n in raw
@@ -481,10 +480,11 @@ def main():
         gt_annotations = json.load(f)
     logger.info(f"Loaded GT annotations from {gt_json_path}")
 
-    # 数据集
-    train_dataset = MIR_ST500_Dataset(config, split='train')
-    val_dataset = MIR_ST500_Dataset(config, split='val')
-    logger.info(f"Train samples: {len(train_dataset)}, Val songs: {len(val_dataset)}")
+    # 数据集（论文对齐：extra_train_splits=['val'] 使用400首训练）
+    extra_train_splits = config.get('data', {}).get('extra_train_splits', None)
+    train_dataset = MIR_ST500_Dataset(config, split='train', extra_splits=extra_train_splits)
+    val_dataset   = MIR_ST500_Dataset(config, split='val')
+    logger.info(f"Train songs: {len(train_dataset.file_list)}, Val songs: {len(val_dataset)}")
 
     train_loader = DataLoader(
         train_dataset,
