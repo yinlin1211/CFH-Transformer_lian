@@ -534,7 +534,7 @@ def main():
         writer = SummaryWriter(str(log_dir / 'tensorboard'))
 
     start_epoch = 1
-    best_val_loss = float('inf')
+    best_con_f1 = 0.0
     best_onset_thresh = 0.3
     best_frame_thresh = 0.3
 
@@ -546,10 +546,10 @@ def main():
         if scaler is not None and 'scaler_state_dict' in ckpt:
             scaler.load_state_dict(ckpt['scaler_state_dict'])
         start_epoch = ckpt['epoch'] + 1
-        best_val_loss = ckpt.get('best_val_loss', float('inf'))
+        best_con_f1 = ckpt.get('best_con_f1', 0.0)
         best_onset_thresh = ckpt.get('best_onset_thresh', 0.3)
         best_frame_thresh = ckpt.get('best_frame_thresh', 0.3)
-        logger.info(f"Resumed from epoch {ckpt['epoch']}, best_val_loss={best_val_loss:.4f}")
+        logger.info(f"Resumed from epoch {ckpt['epoch']}, best_COn_f1={best_con_f1:.4f}")
 
     hop_length = config['audio']['hop_length']
     sample_rate = config['data']['sample_rate']
@@ -612,17 +612,17 @@ def main():
             'COn_f1': con_f1,
             'COnP_f1': conp_f1,
             'COnPOff_f1': conpoff_f1,
-            'best_conp_f1': best_conp_f1,
+            'best_con_f1': best_con_f1,
             'best_onset_thresh': best_onset_thresh,
             'best_frame_thresh': best_frame_thresh,
             'config': config
         }
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            ckpt['best_val_loss'] = best_val_loss
+        if con_f1 > best_con_f1:
+            best_con_f1 = con_f1
+            ckpt['best_con_f1'] = best_con_f1
             torch.save(ckpt, save_dir / 'best_model.pt')
-            logger.info(f"  -> Best model saved! val_loss={best_val_loss:.4f}")
+            logger.info(f"  -> Best model saved! COn_f1={best_con_f1:.4f}")
 
         if epoch % config['training']['save_every'] == 0:
             torch.save(ckpt, save_dir / f'checkpoint_epoch{epoch:04d}.pt')
@@ -632,7 +632,7 @@ def main():
     if writer:
         writer.close()
 
-    logger.info(f"Training complete! Best val_loss: {best_val_loss:.4f}")
+    logger.info(f"Training complete! Best COn_f1: {best_con_f1:.4f}")
     pid_file.unlink(missing_ok=True)
     logger.info(f"Run directory: {run_dir}")
 
