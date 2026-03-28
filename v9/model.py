@@ -231,12 +231,14 @@ class FHTransformer(nn.Module):
     Frequency-Harmonic Transformer。
 
     论文公式(2)：S'_∇(t) = S_∇(t) ⊕ ε(t)
-    其中 ε(t) ∈ R^{F×H} 是 learnable temporal embedding。
+    其中 ε(t) ∈ R^{F×H} 是 learnable temporal embedding（每时间步完整 F×H 矩阵）。
 
-    实现：
-      - temporal_embed: nn.Embedding(max_T, H)
-        每个时间步 t 有独立的 H 维嵌入，广播到 F 维（简化自论文的 F×H）
-      - 序列：S_∇(t) ∈ R^{F×H}，序列长度=F=48，d_model=H=128
+    实现（等价于完整 F×H 矩阵，通过加法分解）：
+      - temporal_embed[t] ∈ R^H：时间身份标签，广播到所有 F 位置
+      - freq_pe[f] ∈ R^H：序列内部频率位置编码，在 Transformer 内部加入
+      - 合并：ε(t)[f, h] = temporal_embed[t][h] + freq_pe[f][h]
+        → 每个 (t, f) 对都有唯一值，等价于完整 F×H 矩阵
+      - 序列：S_∇(t) ∈ R^{F×H}，序列长度=F=48，d_model=H=192
       - T 个时间步并行处理（reshape 为 B*T 批次）
     """
     def __init__(self, H: int, nhead: int, dim_ff: int,
@@ -285,20 +287,15 @@ class HTTransformer(nn.Module):
     Harmonic-Time Transformer。
 
     论文公式(3)：S'_⊔(f) = S_⊔(f) ⊕ H(f)
-    其中 H(f) ∈ R^{H×T} 是 learnable frequency-wise positional encoding。
+    其中 H(f) ∈ R^{H×T} 是 learnable frequency-wise positional encoding（每频率完整 H×T 矩阵）。
 
-    实现：
-      - freq_embed: nn.Embedding(F=48, H)
-        每个频率 bin f 有独立的 H 维嵌入，广播到 T 维（简化自论文的 H×T）
-      - 序列：S_⊔(f) ∈ R^{H×T}，序列长度=T，d_model=H=128
+    实现（等价于完整 H×T 矩阵，通过加法分解）：
+      - freq_embed[f] ∈ R^H：频率身份标签，广播到所有 T 位置
+      - time_pe[t] ∈ R^H：序列内部时间位置编码，在 Transformer 内部加入
+      - 合并：H(f)[h, t] = freq_embed[f][h] + time_pe[t][h]
+        → 每个 (f, t) 对都有唯一值，等价于完整 H×T 矩阵
+      - 序列：S_⊔(f) ∈ R^{H×T}，序列长度=T，d_model=H=192
       - F 个频率 bin 并行处理（reshape 为 B*F 批次）
-
-    【为什么这是最关键的修复】
-    谐波信息由 Tokenizer 提取并压缩在 H 维度中。
-    HT Transformer 的职责是让不同频率 bin 之间建立谐波依赖关系。
-    如果模型无法区分"第1个频率bin"和"第48个频率bin"（即缺少 H(f)），
-    则所有频率 bin 的处理完全对称，谐波关系无法被建立，
-    效果退化为与 "wo harmonics" 相当。
     """
     def __init__(self, F_dim: int, H: int, nhead: int, dim_ff: int,
                  dropout: float, num_layers: int = 1):
@@ -337,20 +334,15 @@ class TFTransformer(nn.Module):
     Time-Frequency Transformer。
 
     论文公式(4)：S'_⊓(h) = S_⊓(h) ⊕ T(h)
-    其中 T(h) ∈ R^{T×F} 是 learnable harmonic-wise positional encoding。
+    其中 T(h) ∈ R^{T×F} 是 learnable harmonic-wise positional encoding（每谐波通道完整 T×F 矩阵）。
 
-    实现：
-      - harm_embed: nn.Embedding(H=128, F=48)
-        每个谐波通道 h 有独立的 F 维嵌入，广播到 T 维（简化自论文的 T×F）
+    实现（等价于完整 T×F 矩阵，通过加法分解）：
+      - harm_embed[h] ∈ R^F：谐波通道身份标签，广播到所有 T 位置
+      - time_pe[t] ∈ R^F：序列内部时间位置编码，在 Transformer 内部加入
+      - 合并：T(h)[t, f] = harm_embed[h][f] + time_pe[t][f]
+        → 每个 (h, t) 对都有唯一值，等价于完整 T×F 矩阵
       - 序列：S_⊓(h) ∈ R^{T×F}，序列长度=T，d_model=F=48
       - H 个谐波通道并行处理（reshape 为 B*H 批次）
-
-    【广播正确性验证】
-    harm_embed(torch.arange(H)) → (H, F)
-    转置 .T → (F, H)
-    unsqueeze(0).unsqueeze(0) → (1, 1, F, H)
-    S (B, T, F, H) + (1, 1, F, H) → 对每个 (b,t,f,h): S[b,t,f,h] += harm_embed[h,f]
-    这正好是"第h个谐波通道在第f个频率位置的嵌入值"，语义正确。
     """
     def __init__(self, F_dim: int, H: int, nhead: int, dim_ff: int,
                  dropout: float, num_layers: int = 1):
