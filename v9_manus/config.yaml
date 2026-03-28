@@ -1,0 +1,54 @@
+# CFT v9_manus 配置文件
+# 基于 v8/v7 配置，修改模型超参数以适配 v9_manus 改进
+#
+# v9_manus 核心改动：
+#   - h_dim: 128 → 192（不降维，保留 6*32=192 的完整 octave 信息）
+#   - nhead_fh: 8（192/8=24 per head）
+#   - nhead_ht: 8（192/8=24 per head，用于 Time Attention 路径）
+#   - nhead_tf: 8（d_tf=128, 128/8=16 per head）
+#   - 新增 d_tf: 128（TF Transformer 内部升维维度）
+
+data:
+  audio_dir: '/mnt/ssd/lian/论文复现/CFH-Transformer/vocal_mp3/'
+  label_path: '/mnt/ssd/lian/论文复现/CFH-Transformer/MIR-ST500_corrected.json'
+  splits_dir: /mnt/ssd/lian/论文复现/CFH-Transformer_v3/splits/
+  cqt_cache_dir: '/mnt/ssd/lian/论文复现/CFH-Transformer/cqt_cache/npy/'
+  sample_rate: 16000
+  segment_frames: 256
+  max_samples_per_epoch: 2000
+  extra_train_splits: ['val']
+
+audio:
+  hop_length: 320
+  cqt_bins: 288
+  bins_per_octave: 48
+  n_octaves: 6
+  fmin: 48.9994
+
+model:
+  h_dim: 192              # v9: 不降维，保留 6*32=192 的完整 octave 信息
+  conv_channels: 32
+  num_cycles: 2
+  num_transformer_layers: 1
+  nhead_fh: 8             # 192/8=24 per head
+  nhead_ht: 8             # 192/8=24 per head（Time Attention 路径）
+  nhead_tf: 8             # d_tf=128, 128/8=16 per head
+  dim_feedforward: 512
+  dropout: 0.1
+  num_pitches: 48
+  d_tf: 128               # TF Transformer 内部升维维度
+
+training:
+  batch_size: 16
+  num_workers: 4
+  learning_rate: 0.0003
+  epochs: 1300
+  run_dir: './run'
+  save_every: 50
+  grad_clip: 1.0
+  warmup_epochs: 0
+
+loss:
+  onset_weight: 1.0
+  offset_weight: 1.0
+  frame_weight: 1.0
