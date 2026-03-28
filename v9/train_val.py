@@ -268,7 +268,7 @@ def infer_full_song(model, cqt_np, device, infer_chunk=256):
             seg = cqt_t[:, :, start:min(end, T_total)]
             chunk_T = seg.shape[2]
             if chunk_T < infer_chunk:
-                seg = torch.nn.functional.pad(seg, (0, infer_chunk - chunk_T))
+                seg = torch.nn.functional.pad(seg, (0, infer_chunk - chunk_T), value=-80.0)
             onset_logit, frame_logit, _ = model(seg.to(device))
             onset_prob = torch.sigmoid(onset_logit[0, :chunk_T]).cpu().numpy()
             frame_prob = torch.sigmoid(frame_logit[0, :chunk_T]).cpu().numpy()
