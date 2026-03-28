@@ -200,7 +200,10 @@ class HTTransformer(nn.Module):
         # 路径A：Octave Attention
         self.octave_pe = LearnablePE(conv_channels, max_len=8)
         self.freq_embed_oct = nn.Embedding(F_dim, conv_channels)
-        oct_nhead = 4
+        # conv_channels=32，找最大的能整除 32 的 nhead
+        # 32 的因子：1, 2, 4, 8, 16, 32
+        # 选择 8（32/8=4 per head）
+        oct_nhead = 8
         while conv_channels % oct_nhead != 0 and oct_nhead > 1:
             oct_nhead -= 1
         oct_layer = nn.TransformerEncoderLayer(
