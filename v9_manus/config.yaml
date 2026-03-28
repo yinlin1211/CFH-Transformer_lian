@@ -39,7 +39,7 @@ model:
   d_tf: 128               # TF Transformer 内部升维维度
 
 training:
-  batch_size: 16
+  batch_size: 8
   num_workers: 4
   learning_rate: 0.0003
   epochs: 1300
