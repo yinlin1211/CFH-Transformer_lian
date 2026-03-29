@@ -7,7 +7,7 @@ CFT Model — v10_manus
 相对 v9_manus 的修复：
   [修复1] 所有 TransformerEncoder 补充 norm=nn.LayerNorm(d_model)，
           修复 Pre-Norm 架构下的 NaN 崩溃。
-  [修复2] HTTransformer 恢复论文设计：seq_len=H, d_model=T。
+  [修复2] HTTransformer 恢复论文设计：seq_len=T, d_model=H（与 v7 一致）。
   [修复3] TFTransformer 恢复论文设计：seq_len=T, d_model=F，去掉升维投影。
   [修复4] 位置编码采用低秩分解实现（1D Embedding + LearnablePE），
           参数量可控，收敛速度快。
@@ -221,79 +221,49 @@ class HTTransformer(nn.Module):
 
     对 S_⊔ ∈ R^{T×F×H} 沿 frequency 轴切分，得到 F 个 S_⊔(f) ∈ R^{H×T}。
     加入 learnable frequency-wise positional encoding H(f)。
-    seq_len = H = 192，d_model = T，F 个频率 bin 并行处理。
+
+    实现：seq_len = T，d_model = H，F 个频率 bin 并行处理（B*F 批次）。
+    论文 S_⊔(f) ∈ R^{H×T} 的 H×T 是矩阵形状记号，不规定 seq_len。
+    选择 seq_len=T 让 Attention 在时间帧之间建模谐波特征的时序依赖，
+    d_model=H 让 FFN 在谐波特征空间中做非线性变换。
 
     位置编码（低秩分解实现论文 H(f) ∈ R^{H×T}）：
-      - freq_embed: Embedding(F, H_dim) — 全局频率标签，区分不同频率 bin
-      - harm_pe: LearnablePE(T_max) — 序列内部位置编码，区分 192 个谐波通道
-
-    注意：这里 d_model=T（时间维度），与 v7 的 d_model=H 不同。
-    v7 的 HTTransformer 是 seq_len=T, d_model=H，本质上是时间序列建模。
-    v10 严格按论文：seq_len=H, d_model=T，本质上是谐波序列建模。
+      - freq_embed: Embedding(F, H) — 全局频率标签，区分不同频率 bin
+      - time_pe: LearnablePE(H, max_len=4096) — 序列内部时间位置编码
     """
-    def __init__(self, F_dim: int, H: int, T_max: int,
+    def __init__(self, F_dim: int, H: int,
                  nhead: int, dim_ff: int, dropout: float, num_layers: int = 1):
         super().__init__()
-        self.F_dim = F_dim
-        self.H = H
-        self.T_max = T_max
-
-        # 全局频率标签：每个频率 bin f 有独立的嵌入
-        # 嵌入维度 = T_max（因为 d_model = T_max）
-        self.freq_embed = nn.Embedding(F_dim, T_max)
-        # 序列内部谐波位置 PE（序列长度=H=192）
-        self.harm_pe = LearnablePE(T_max, max_len=256)
-
-        # d_model = T_max，nhead 需能整除 T_max
-        ht_nhead = nhead
-        while T_max % ht_nhead != 0 and ht_nhead > 1:
-            ht_nhead -= 1
+        # 全局频率标签：每个频率 bin f 有独立的 H 维嵌入（对应论文 H(f)）
+        self.freq_embed = nn.Embedding(F_dim, H)
+        # 序列内部时间位置 PE（序列长度=T，d_model=H）
+        self.time_pe = LearnablePE(H, max_len=4096)
 
         layer = nn.TransformerEncoderLayer(
-            d_model=T_max, nhead=ht_nhead, dim_feedforward=dim_ff,
+            d_model=H, nhead=nhead, dim_feedforward=dim_ff,
             dropout=dropout, activation='gelu',
             batch_first=True, norm_first=True
         )
         self.encoder = nn.TransformerEncoder(
             layer, num_layers=num_layers,
-            norm=nn.LayerNorm(T_max)  # [修复1] Pre-Norm 必须加 final norm
+            norm=nn.LayerNorm(H)  # Pre-Norm 必须加 final norm
         )
 
     def forward(self, S: torch.Tensor) -> torch.Tensor:
         """S: (B, T, F, H) → (B, T, F, H)"""
         B, T, F, H = S.shape
-        T_pad = self.T_max
-        need_pad = (T < T_pad)
 
-        # 沿 frequency 轴切分：对每个 f，处理 S_⊔(f) ∈ R^{H×T}
-        x = S.permute(0, 2, 3, 1)            # (B, F, H, T)
-
-        # 加入频率标签 H(f)
+        # 加入频率标签 H(f)（论文公式3）
         f_idx = torch.arange(F, device=S.device)
-        f_emb = self.freq_embed(f_idx)        # (F, T_max)
-        # 广播：(F, T_max) → (1, F, 1, T_max)，截取 [:T]
-        x = x + f_emb[:, :T].unsqueeze(0).unsqueeze(2)
+        f_emb = self.freq_embed(f_idx)                  # (F, H)
+        # 广播：(F, H) → (1, 1, F, H) → 加到 S (B, T, F, H)
+        S = S + f_emb.unsqueeze(0).unsqueeze(0)
 
-        x = x.reshape(B * F, H, T)            # (B*F, H, T)
-
-        # 如果 T < T_max（推理最后一片段），padding 到 T_max
-        if need_pad:
-            x = F_func.pad(x, (0, T_pad - T))  # (B*F, H, T_max)
-
-        # 序列内部谐波位置编码
-        x = self.harm_pe(x)
-
-        # Transformer：seq_len=H, d_model=T_max
-        x = self.encoder(x)                    # (B*F, H, T_max)
-
-        # 截取回原始 T
-        if need_pad:
-            x = x[:, :, :T]                    # (B*F, H, T)
-
-        # 还原形状
-        x = x.reshape(B, F, H, T)             # (B, F, H, T)
-        x = x.permute(0, 3, 1, 2)             # (B, T, F, H)
-        return x
+        # F 个频率 bin 并行，每个 bin 序列长度=T, d_model=H
+        x = S.permute(0, 2, 1, 3).reshape(B * F, T, H)  # (B*F, T, H)
+        x = self.time_pe(x)                              # 序列内部位置编码
+        x = self.encoder(x)                              # (B*F, T, H)
+        return x.reshape(B, F, T, H).permute(0, 2, 1, 3)  # (B, T, F, H)
 
 
 class TFTransformer(nn.Module):
@@ -397,8 +367,6 @@ class CFT_v9(nn.Module):
         self.dim_ff       = m.get('dim_feedforward', 512)
         self.dropout      = m.get('dropout', 0.1)
         self.num_pitches  = m.get('num_pitches', 48)
-        self.segment_T    = cfg['data'].get('segment_frames', 256)
-
         self.F_token = self.bins_per_oct
 
         assert self.H % self.nhead_fh == 0, \
@@ -420,7 +388,7 @@ class CFT_v9(nn.Module):
             for _ in range(self.num_cycles)
         ])
         self.ht_transformers = nn.ModuleList([
-            HTTransformer(self.F_token, self.H, self.segment_T,
+            HTTransformer(self.F_token, self.H,
                           self.nhead_ht, self.dim_ff,
                           self.dropout, self.num_layers)
             for _ in range(self.num_cycles)
@@ -488,7 +456,7 @@ class CFTLoss(nn.Module):
 
 if __name__ == "__main__":
     cfg = {
-        'data': {'segment_frames': 256},
+        'data': {},
         'model': {
             'h_dim': 192,
             'conv_channels': 32,
