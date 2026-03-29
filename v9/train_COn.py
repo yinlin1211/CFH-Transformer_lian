@@ -215,6 +215,18 @@ def train_epoch(model, loader, criterion, optimizer, device, epoch, logger,
                 onset_label, frame_label, offset_label
             )
 
+        # NaN guard: skip batch if loss is non-finite (float16 overflow)
+        if not torch.isfinite(loss):
+            logger.warning(
+                f"Batch {batch_idx}: non-finite loss "
+                f"(onset={onset_loss.item():.4f} frame={frame_loss.item():.4f} "
+                f"offset={offset_loss.item():.4f}), skipping"
+            )
+            optimizer.zero_grad()
+            if scaler is not None:
+                scaler.update()
+            continue
+
         if scaler is not None:
             scaler.scale(loss).backward()
             if grad_clip > 0:
@@ -504,7 +516,7 @@ def main():
     logger.info("Tokenization: continuous kernels [3,5,7] (paper-aligned, no dilation)")
 
     # 混合精度
-    scaler = GradScaler() if device.type == 'cuda' else None
+    scaler = GradScaler(init_scale=2**13) if device.type == 'cuda' else None
     if scaler is not None:
         logger.info("Mixed precision (AMP) enabled")
 
