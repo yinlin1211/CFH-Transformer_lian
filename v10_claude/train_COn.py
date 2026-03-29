@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
 from pathlib import Path
 from datetime import datetime
@@ -201,7 +201,7 @@ def train_epoch(model, loader, criterion, optimizer, device, epoch, logger,
         offset_label = labels['offset'].to(device)
 
         optimizer.zero_grad()
-        with autocast():
+        with autocast('cuda'):
             onset_pred, frame_pred, offset_pred = model(cqt)
             loss, onset_loss, frame_loss, offset_loss = criterion(
                 onset_pred, frame_pred, offset_pred,
@@ -509,7 +509,7 @@ def main():
     logger.info("Tokenization: continuous kernels [3,5,7] (paper-aligned, no dilation)")
 
     # 混合精度
-    scaler = GradScaler(init_scale=2**13) if device.type == 'cuda' else None
+    scaler = GradScaler('cuda', init_scale=2**13) if device.type == 'cuda' else None
     if scaler is not None:
         logger.info("Mixed precision (AMP) enabled")
 

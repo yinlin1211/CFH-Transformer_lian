@@ -35,8 +35,8 @@ data:
   splits_dir: /mnt/ssd/lian/论文复现/CFH-Transformer_v3/splits/
   cqt_cache_dir: '/mnt/ssd/lian/论文复现/CFH-Transformer/cqt_cache/npy/'
   sample_rate: 16000
-  segment_frames: 256
-  max_samples_per_epoch: 2000
+  segment_frames: 128           # 256→128：HT attention 内存 O(T²)，减半T降低4x显存
+  max_samples_per_epoch: 4000   # 补偿segment缩短：保持每epoch总帧数不变 (2000×256=4000×128)
   # 论文 Section 3.1："we use the same 400 songs of MIR-ST500 for training"
   # train.txt=360首 + val.txt=40首 = 400首
   extra_train_splits: ['val']
