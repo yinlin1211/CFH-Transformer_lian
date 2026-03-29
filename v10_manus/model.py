@@ -1,4 +1,40 @@
-"""\nCFT Model — v10_manus\n========================================\n\n【v10_manus 相对 v9_manus 的修复（严格贴紧论文）】\n\n问题诊断：v9_manus 在 Epoch 17 出现 NaN 崩溃，根本原因如下：\n\n  [Bug 1 - NaN 直接原因] 所有 TransformerEncoder 缺少 norm 参数。\n    论文使用 Pre-Norm（norm_first=True），PyTorch 的 TransformerEncoder\n    在 Pre-Norm 模式下若不传 norm=nn.LayerNorm(d_model)，最后一层残差流\n    没有归一化，方差随层数累积，在 AMP FP16 下溢出变成 NaN。\n    这是 Epoch 17 崩溃的直接原因。\n\n  [Bug 2 - HTTransformer 偏离论文] v9_manus 改成了双路 Octave Attention\n    + Time Attention + 门控融合，完全偏离论文设计。\n    论文 Section 2.3：HT 对每个 frequency bin f，处理 seq_len=H 的谐波序列，\n    d_model=T（时间维度），加 learnable H(f) 位置编码（公式3）。\n\n  [Bug 3 - TFTransformer 偏离论文] v9_manus 加了 proj_up/proj_down 升维\n    （F→128→F），论文没有这个操作。\n    论文 Section 2.3：TF 对每个 harmonic h，处理 seq_len=T 的时间序列，\n    d_model=F（频率维度），加 learnable T(h) 位置编码（公式4）。\n\n修复方案（只修复上述三处 bug，不增加任何论文外的功能）：\n  [修复1] 在所有 TransformerEncoder 中补充 norm=nn.LayerNorm(d_model) 参数。\n  [修复2] 将 HTTransformer 恢复为论文设计：seq_len=H, d_model=T。\n  [修复3] 将 TFTransformer 恢复为论文设计：seq_len=T, d_model=F，去掉升维投影。\n  [不变]  FHTransformer、Tokenizer、GAP、损失函数、train.py 均不改动。\n"""
+"""
+CFT Model — v10_manus
+========================================
+
+【v10_manus 相对 v9_manus 的修复（严格贴紧论文）】
+
+问题诊断：v9_manus 在 Epoch 17 出现 NaN 崩溃，根本原因如下：
+
+  [Bug 1 - NaN 直接原因] 所有 TransformerEncoder 缺少 norm 参数。
+    论文使用 Pre-Norm（norm_first=True），PyTorch 的 TransformerEncoder
+    在 Pre-Norm 模式下若不传 norm=nn.LayerNorm(d_model)，最后一层残差流
+    没有归一化，方差随层数累积，在 AMP FP16 下溢出变成 NaN。
+
+  [Bug 2 - HTTransformer 偏离论文] v9_manus 改成了双路 Octave Attention
+    + Time Attention + 门控融合，完全偏离论文设计。
+
+  [Bug 3 - TFTransformer 偏离论文] v9_manus 加了 proj_up/proj_down 升维
+    （F→128→F），论文没有这个操作。
+
+  [Bug 4 - 位置编码维度不对] 三个 Transformer 的位置编码维度与论文不一致：
+    论文 E(t) ∈ R^{F×H}，代码只有 R^H
+    论文 H(f) ∈ R^{H×T}，代码用可分离近似 R^H + R^T
+    论文 T(h) ∈ R^{T×F}，代码只有 R^F
+
+  [Bug 5 - FHTransformer 多余的 freq_pe] 论文没有 frequency 位置编码，
+    E(t) ∈ R^{F×H} 已隐含 frequency 位置信息。
+
+修复方案（严格贴紧论文，不增加任何论文外的功能）：
+  [修复1] 在所有 TransformerEncoder 中补充 norm=nn.LayerNorm(d_model)。
+  [修复2] HTTransformer 恢复论文设计：seq_len=H, d_model=T。
+  [修复3] TFTransformer 恢复论文设计：seq_len=T, d_model=F，去掉升维投影。
+  [修复4] 三个位置编码恢复论文完整维度：
+    E(t) → nn.Parameter(T_max, F, H)
+    H(f) → nn.Parameter(F, H, T_max)
+    T(h) → nn.Parameter(H, T_max, F)
+  [修复5] 删除 FHTransformer 的 freq_pe 和 TFTransformer 的分块代码。
+"""
 
 import torch
 import torch.nn as nn
@@ -66,7 +102,7 @@ class From2Dto3D(nn.Module):
 class HarmonicTokenizer(nn.Module):
     """
     CQT → 3D tokens S ∈ R^{T×F×H}
-    v9: H=192（不降维），保留完整 octave 谐波信息。
+    H = n_octaves × conv_channels（保留完整 octave 谐波信息）。
     """
     def __init__(self, n_octaves: int = 6, bins_per_octave: int = 48,
                  h_dim: int = 192, octave_depth: int = 4,
@@ -99,86 +135,19 @@ class HarmonicTokenizer(nn.Module):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 位置编码
-# ═════════════════════════════════════════════════════════════════════════════
-
-class LearnablePE(nn.Module):
-    def __init__(self, d_model: int, max_len: int = 512):
-        super().__init__()
-        self.max_len = max_len
-        self.pe = nn.Parameter(torch.randn(max_len, d_model) * 0.02)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        seq_len = x.shape[-2]
-        if seq_len <= self.max_len:
-            return x + self.pe[:seq_len]
-        else:
-            pe_expanded = F_func.interpolate(
-                self.pe.unsqueeze(0).transpose(1, 2),
-                size=seq_len, mode='linear', align_corners=False
-            ).transpose(1, 2).squeeze(0)
-            return x + pe_expanded
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# v9_manus 三个 Transformer
+# 三个 Transformer（严格对照论文 Section 2.3）
 # ═════════════════════════════════════════════════════════════════════════════
 
 class FHTransformer(nn.Module):
     """
-    Frequency-Harmonic Transformer（论文 Section 2.3）。
+    Frequency-Harmonic Transformer（论文 Section 2.3，公式2）。
 
-    论文：对 S ∈ R^{T×F×H} 沿 time 轴切分，得到 T 个 S_∇(t) ∈ R^{F×H}。
-    加入 learnable temporal embedding ε(t) ∈ R^{F×H}（公式2）。
+    对 S ∈ R^{T×F×H} 沿 time 轴切分，得到 T 个 S_∇(t) ∈ R^{F×H}。
+    加入 learnable temporal embedding E(t) ∈ R^{F×H}。
     seq_len = F，d_model = H，T 个时间步并行处理。
 
-    [修复1] 补充 norm=nn.LayerNorm(H)，防止 Pre-Norm 下残差流方差累积导致 NaN。
-    """
-    def __init__(self, H: int, nhead: int, dim_ff: int,
-                 dropout: float, num_layers: int = 1, max_T: int = 4096):
-        super().__init__()
-        self.temporal_embed = nn.Embedding(max_T, H)
-        self.freq_pe = LearnablePE(H, max_len=64)
-        layer = nn.TransformerEncoderLayer(
-            d_model=H, nhead=nhead, dim_feedforward=dim_ff,
-            dropout=dropout, activation='gelu',
-            batch_first=True, norm_first=True
-        )
-        # [修复1] 补充 final norm，Pre-Norm 架构必须有此参数以稳定残差流
-        self.encoder = nn.TransformerEncoder(
-            layer, num_layers=num_layers,
-            norm=nn.LayerNorm(H)
-        )
-
-    def forward(self, S: torch.Tensor) -> torch.Tensor:
-        B, T, F, H = S.shape
-        if T <= self.temporal_embed.num_embeddings:
-            t_emb = self.temporal_embed(torch.arange(T, device=S.device))
-        else:
-            t_emb = F_func.interpolate(
-                self.temporal_embed.weight.unsqueeze(0).transpose(1, 2),
-                size=T, mode='linear', align_corners=False
-            ).squeeze(0).transpose(0, 1)
-        S = S + t_emb.unsqueeze(0).unsqueeze(2)
-        x = S.reshape(B * T, F, H)
-        x = self.freq_pe(x)
-        x = self.encoder(x)
-        return x.reshape(B, T, F, H)
-
-
-class HTTransformer(nn.Module):
-    """
-    Harmonic-Time Transformer（论文 Section 2.3）。
-
-    论文：对 S_⊔ ∈ R^{T×F×H} 沿 frequency 轴切分，得到 F 个 S_⊔(f) ∈ R^{H×T}。
-    加入 learnable frequency-wise positional encoding H(f) ∈ R^{H×T}（公式3）。
-    seq_len = H，d_model = T，F 个频率 bin 并行处理。
-
-    [修复2] 恢复论文设计，去掉 v9_manus 的双路 Octave+Time Attention 门控架构。
-    [修复1] 补充 final norm，防止 NaN。
-
-    注：HTTransformer 的 d_model=T（时间长度）在训练时固定为 segment_frames，
-    推理时分块长度也应与 segment_frames 一致（predict_to_json.py 已按此实现）。
+    位置编码：E(t) ∈ R^{F×H}（论文公式2，完整 2D 编码，隐含 frequency 位置信息）。
+    不需要额外的 frequency 位置编码。
     """
     def __init__(self, F_dim: int, H: int, T_max: int,
                  nhead: int, dim_ff: int, dropout: float, num_layers: int = 1):
@@ -187,102 +156,128 @@ class HTTransformer(nn.Module):
         self.H = H
         self.T_max = T_max
 
-        # learnable H(f)：frequency-wise positional encoding H(f) ∈ R^{H×T}（公式3）
-        # 用可分离编码：freq_h_pe(f) ∈ R^H 编码 harmonic 维，freq_t_pe(f) ∈ R^{T_max} 编码时间维
-        # 参数量从 F×H×T_max 降到 F×H + F×T_max，数值更稳定，且支持变长 T
-        self.freq_h_pe = nn.Embedding(F_dim, H)      # 每个 f 对应 H 维编码
-        self.freq_t_pe = nn.Embedding(F_dim, T_max)  # 每个 f 对应 T_max 维编码
+        # E(t) ∈ R^{F×H}：论文公式2，每个时间步 t 有完整的 F×H 编码
+        self.temporal_pe = nn.Parameter(torch.randn(T_max, F_dim, H) * 0.02)
 
-        # d_model = T_max，nhead 需能整除 T_max
-        ht_nhead = nhead
-        while T_max % ht_nhead != 0 and ht_nhead > 1:
-            ht_nhead -= 1
-        self.ht_nhead = ht_nhead
-        self.dim_ff = dim_ff
-        self.dropout_val = dropout
-        self.num_layers = num_layers
-
-        # 主训练路径：d_model=T_max（训练和推理时 T=T_max）
         layer = nn.TransformerEncoderLayer(
-            d_model=T_max, nhead=ht_nhead, dim_feedforward=dim_ff,
+            d_model=H, nhead=nhead, dim_feedforward=dim_ff,
             dropout=dropout, activation='gelu',
             batch_first=True, norm_first=True
         )
-        # [修复1] 补充 final norm
         self.encoder = nn.TransformerEncoder(
             layer, num_layers=num_layers,
-            norm=nn.LayerNorm(T_max)
+            norm=nn.LayerNorm(H)
         )
-
-    def _get_encoder(self, T: int, device):
-        """当 T != T_max 时（如推理最后一片段），动态创建匹配的 encoder。"""
-        if T == self.T_max:
-            return self.encoder
-        # 临时创建小 encoder，共享权重不可行，改用 padding 方式
-        return None
 
     def forward(self, S: torch.Tensor) -> torch.Tensor:
         """
         S: (B, T, F, H)
         返回: (B, T, F, H)
+        """
+        B, T, F, H = S.shape
 
-        当 T < T_max 时（如推理最后一片段），对 T 维 padding 到 T_max。
+        # 加入 E(t) ∈ R^{F×H}（公式2）
+        pe = self.temporal_pe[:T]             # (T, F, H)
+        S = S + pe.unsqueeze(0)               # (B, T, F, H) + (1, T, F, H)
+
+        # 沿 time 轴切分，T 个时间步并行
+        x = S.reshape(B * T, F, H)            # (B*T, F, H)
+
+        # Transformer：seq_len=F, d_model=H
+        x = self.encoder(x)                   # (B*T, F, H)
+
+        return x.reshape(B, T, F, H)
+
+
+class HTTransformer(nn.Module):
+    """
+    Harmonic-Time Transformer（论文 Section 2.3，公式3）。
+
+    对 S_⊔ ∈ R^{T×F×H} 沿 frequency 轴切分，得到 F 个 S_⊔(f) ∈ R^{H×T}。
+    加入 learnable frequency-wise positional encoding H(f) ∈ R^{H×T}。
+    seq_len = H，d_model = T，F 个频率 bin 并行处理。
+
+    位置编码：H(f) ∈ R^{H×T}（论文公式3，完整 2D 编码）。
+    """
+    def __init__(self, F_dim: int, H: int, T_max: int,
+                 nhead: int, dim_ff: int, dropout: float, num_layers: int = 1):
+        super().__init__()
+        self.F_dim = F_dim
+        self.H = H
+        self.T_max = T_max
+
+        # H(f) ∈ R^{H×T}：论文公式3，每个频率 f 有完整的 H×T 编码
+        self.freq_pe = nn.Parameter(torch.randn(F_dim, H, T_max) * 0.02)
+
+        # d_model = T_max，nhead 需能整除 T_max
+        ht_nhead = nhead
+        while T_max % ht_nhead != 0 and ht_nhead > 1:
+            ht_nhead -= 1
+
+        layer = nn.TransformerEncoderLayer(
+            d_model=T_max, nhead=ht_nhead, dim_feedforward=dim_ff,
+            dropout=dropout, activation='gelu',
+            batch_first=True, norm_first=True
+        )
+        self.encoder = nn.TransformerEncoder(
+            layer, num_layers=num_layers,
+            norm=nn.LayerNorm(T_max)
+        )
+
+    def forward(self, S: torch.Tensor) -> torch.Tensor:
+        """
+        S: (B, T, F, H)
+        返回: (B, T, F, H)
         """
         B, T, F, H = S.shape
         T_pad = self.T_max
         need_pad = (T < T_pad)
 
         # 沿 frequency 轴切分：对每个 f，处理 S_⊔(f) ∈ R^{H×T}
-        x = S.permute(0, 2, 3, 1)          # (B, F, H, T)
-        x = x.reshape(B * F, H, T)          # (B*F, H, T)
+        x = S.permute(0, 2, 3, 1)            # (B, F, H, T)
 
-        # 加入 learnable H(f)（公式3）：可分离编码
-        f_idx = torch.arange(F, device=S.device)
-        fh = self.freq_h_pe(f_idx)                         # (F, H)
-        fh = fh.unsqueeze(0).expand(B, -1, -1)             # (B, F, H)
-        fh = fh.reshape(B * F, H).unsqueeze(-1)            # (B*F, H, 1)
-        ft = self.freq_t_pe(f_idx)[:, :T]                  # (F, T)
-        ft = ft.unsqueeze(0).expand(B, -1, -1)             # (B, F, T)
-        ft = ft.reshape(B * F, T).unsqueeze(1)             # (B*F, 1, T)
-        x = x + fh + ft                                    # (B*F, H, T)
+        # 加入 H(f) ∈ R^{H×T}（公式3）
+        pe = self.freq_pe[:, :, :T]           # (F, H, T)
+        x = x + pe.unsqueeze(0)               # (B, F, H, T) + (1, F, H, T)
 
-        # 如果 T < T_max，对 T 维 padding 到 T_max，推理后截取
+        x = x.reshape(B * F, H, T)            # (B*F, H, T)
+
+        # 如果 T < T_max（推理最后一片段），padding 到 T_max
         if need_pad:
-            x = F_func.pad(x, (0, T_pad - T))             # (B*F, H, T_max)
+            x = F_func.pad(x, (0, T_pad - T))  # (B*F, H, T_max)
 
         # Transformer：seq_len=H, d_model=T_max
-        x = self.encoder(x)                                # (B*F, H, T_max)
+        x = self.encoder(x)                    # (B*F, H, T_max)
 
-        # 截取回原始 T 长度
+        # 截取回原始 T
         if need_pad:
-            x = x[:, :, :T]                                # (B*F, H, T)
+            x = x[:, :, :T]                    # (B*F, H, T)
 
         # 还原形状
-        x = x.reshape(B, F, H, T)           # (B, F, H, T)
-        x = x.permute(0, 3, 1, 2)           # (B, T, F, H)
+        x = x.reshape(B, F, H, T)             # (B, F, H, T)
+        x = x.permute(0, 3, 1, 2)             # (B, T, F, H)
         return x
 
 
 class TFTransformer(nn.Module):
     """
-    Time-Frequency Transformer（论文 Section 2.3）。
+    Time-Frequency Transformer（论文 Section 2.3，公式4）。
 
-    论文：对 S_⊓ ∈ R^{T×F×H} 沿 harmonic 轴切分，得到 H 个 S_⊓(h) ∈ R^{T×F}。
-    加入 learnable harmonic-wise positional encoding T(h) ∈ R^{T×F}（公式4）。
+    对 S_⊓ ∈ R^{T×F×H} 沿 harmonic 轴切分，得到 H 个 S_⊓(h) ∈ R^{T×F}。
+    加入 learnable harmonic-wise positional encoding T(h) ∈ R^{T×F}。
     seq_len = T，d_model = F，H 个谐波通道并行处理。
 
-    [修复3] 恢复论文设计，去掉 v9_manus 的 proj_up/proj_down 升维投影。
-    [修复1] 补充 norm=nn.LayerNorm(F_dim)，防止 NaN。
+    位置编码：T(h) ∈ R^{T×F}（论文公式4，完整 2D 编码）。
     """
-    def __init__(self, F_dim: int, H: int, nhead: int, dim_ff: int,
-                 dropout: float, num_layers: int = 1):
+    def __init__(self, F_dim: int, H: int, T_max: int,
+                 nhead: int, dim_ff: int, dropout: float, num_layers: int = 1):
         super().__init__()
         self.F_dim = F_dim
         self.H = H
+        self.T_max = T_max
 
-        # learnable T(h)：harmonic-wise positional encoding
-        # 每个 harmonic h 有独立的 (F,) 编码，broadcast 到 (T, F)
-        self.time_pe = nn.Embedding(H, F_dim)
+        # T(h) ∈ R^{T×F}：论文公式4，每个谐波 h 有完整的 T×F 编码
+        self.harm_pe = nn.Parameter(torch.randn(H, T_max, F_dim) * 0.02)
 
         # nhead 需能整除 F_dim（d_model = F）
         tf_nhead = nhead
@@ -294,7 +289,6 @@ class TFTransformer(nn.Module):
             dropout=dropout, activation='gelu',
             batch_first=True, norm_first=True
         )
-        # [修复1] 补充 final norm
         self.encoder = nn.TransformerEncoder(
             layer, num_layers=num_layers,
             norm=nn.LayerNorm(F_dim)
@@ -308,29 +302,25 @@ class TFTransformer(nn.Module):
         B, T, F, H = S.shape
 
         # 沿 harmonic 轴切分：对每个 h，处理 S_⊓(h) ∈ R^{T×F}
-        # reshape 为 (B*H, T, F)
-        x = S.permute(0, 3, 1, 2)           # (B, H, T, F)
-        x = x.reshape(B * H, T, F)           # (B*H, T, F)
+        x = S.permute(0, 3, 1, 2)            # (B, H, T, F)
 
-        # 加入 learnable T(h)（公式4）
-        h_idx = torch.arange(H, device=S.device)
-        t_pe = self.time_pe(h_idx)            # (H, F)
-        t_pe = t_pe.unsqueeze(1)              # (H, 1, F)
-        t_pe = t_pe.unsqueeze(0).expand(B, -1, -1, -1)  # (B, H, 1, F)
-        t_pe = t_pe.reshape(B * H, 1, F)                 # (B*H, 1, F)
-        x = x + t_pe
+        # 加入 T(h) ∈ R^{T×F}（公式4）
+        pe = self.harm_pe[:, :T, :]           # (H, T, F)
+        x = x + pe.unsqueeze(0)               # (B, H, T, F) + (1, H, T, F)
+
+        x = x.reshape(B * H, T, F)            # (B*H, T, F)
 
         # Transformer：seq_len=T, d_model=F
         x = self.encoder(x)                   # (B*H, T, F)
 
         # 还原形状
-        x = x.reshape(B, H, T, F)            # (B, H, T, F)
-        x = x.permute(0, 2, 3, 1)            # (B, T, F, H)
+        x = x.reshape(B, H, T, F)             # (B, H, T, F)
+        x = x.permute(0, 2, 3, 1)             # (B, T, F, H)
         return x
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 完整 CFT 模型（v9_manus）
+# 完整 CFT 模型
 # ═════════════════════════════════════════════════════════════════════════════
 
 class CFT_v9(nn.Module):
@@ -361,8 +351,9 @@ class CFT_v9(nn.Module):
         self.dim_ff       = m.get('dim_feedforward', 512)
         self.dropout      = m.get('dropout', 0.1)
         self.num_pitches  = m.get('num_pitches', 48)
-        # segment_frames 决定 HTTransformer 的 d_model=T
         self.segment_T    = cfg['data'].get('segment_frames', 256)
+
+        self.F_token = self.bins_per_oct
 
         assert self.H % self.nhead_fh == 0, \
             f"H={self.H} must be divisible by nhead_fh={self.nhead_fh}"
@@ -376,10 +367,10 @@ class CFT_v9(nn.Module):
             conv_channels=self.conv_ch,
             time_width=3,
         )
-        self.F_token = self.bins_per_oct
 
         self.fh_transformers = nn.ModuleList([
-            FHTransformer(self.H, self.nhead_fh, self.dim_ff,
+            FHTransformer(self.F_token, self.H, self.segment_T,
+                          self.nhead_fh, self.dim_ff,
                           self.dropout, self.num_layers)
             for _ in range(self.num_cycles)
         ])
@@ -390,7 +381,7 @@ class CFT_v9(nn.Module):
             for _ in range(self.num_cycles)
         ])
         self.tf_transformers = nn.ModuleList([
-            TFTransformer(self.F_token, self.H,
+            TFTransformer(self.F_token, self.H, self.segment_T,
                           self.nhead_tf, self.dim_ff,
                           self.dropout, self.num_layers)
             for _ in range(self.num_cycles)
