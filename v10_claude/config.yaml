@@ -1,0 +1,78 @@
+# CFH-Transformer v10_claude 配置文件
+# ============================================================
+# 论文对齐清单（CFH-Transformer, ICASSP 2023）
+#
+# ✅ 论文明确说明（已对齐）：
+#   - 288-bin CQT，G1~F7，6 octaves × 48 bins/octave  (Section 3.3)
+#   - hop_length=320, sample_rate=16000               (Section 3.3)
+#   - batch_size=16, Adam optimizer, lr=3e-4          (Section 3.3)
+#   - kernel_size=(4, 3/5/7, 3) ∈ (octave,pitch,time)(Fig.3, Section 3.3)
+#   - pitch_class 维度循环 padding（音高循环性）       (Section 3.3)
+#   - time 维度因果 padding（不泄露未来）              (Section 3.3)
+#   - 每个 Transformer 只用 1 encoder layer           (Section 3.3)
+#   - 3 Transformers: FH → HT → TF，循环 M 次        (Fig.2)
+#   - H = n_octaves × conv_channels（无降维投影）      (核心修复)
+#   - GAP 沿 H 轴 + 3 输出头 (onset/frame/offset)    (Section 2.1, Fig.2)
+#   - BCE 损失，均等权重                               (公式1)
+#   - MIDI 36~83（C2~B5），共 48 个音高               (ref22 CECTC paper)
+#   - 训练集 400 首（train.txt + val.txt）             (Section 3.1)
+#   - onset_tolerance=50ms, pitch_tolerance=50 cents  (Section 3.4)
+#   - 50% 重叠推理（predict_to_json.py 与论文一致）
+#
+# ⚪ 论文未明确说明（合理估计）：
+#   - num_cycles M=2                （论文未给出具体值）
+#   - dim_feedforward=512           （论文未说明）
+#   - dropout=0.1                   （论文未说明）
+#   - epochs=1300                   （由 Fig.4 X轴 160k iters 推算）
+#   - CosineAnnealingLR             （论文未提调度器）
+#   - conv_channels=32              （论文未给出，合理值）
+#   - AMP + GradScaler(init_scale=2^13) （工程稳定性，防 float16 溢出）
+# ============================================================
+
+data:
+  audio_dir: '/mnt/ssd/lian/论文复现/CFH-Transformer/vocal_mp3/'
+  label_path: '/mnt/ssd/lian/论文复现/CFH-Transformer/MIR-ST500_corrected.json'
+  splits_dir: /mnt/ssd/lian/论文复现/CFH-Transformer_v3/splits/
+  cqt_cache_dir: '/mnt/ssd/lian/论文复现/CFH-Transformer/cqt_cache/npy/'
+  sample_rate: 16000
+  segment_frames: 256
+  max_samples_per_epoch: 2000
+  # 论文 Section 3.1："we use the same 400 songs of MIR-ST500 for training"
+  # train.txt=360首 + val.txt=40首 = 400首
+  extra_train_splits: ['val']
+
+audio:
+  hop_length: 320
+  cqt_bins: 288           # 论文：288-bin CQT，G1~F7
+  bins_per_octave: 48     # 论文：72 semitones × 4 bins = 288，每 octave 48 bins
+  n_octaves: 6            # 论文：6 octaves
+  fmin: 48.9994           # G1 = 48.9994 Hz
+
+model:
+  # h_dim = n_octaves(6) × conv_channels(32) = 192
+  # 必须满足 h_dim == n_octaves * conv_channels（否则启动时报错）
+  h_dim: 192
+  conv_channels: 32
+  num_cycles: 2               # 论文未明确，M=2 为合理估计
+  num_transformer_layers: 1   # 论文 Section 3.3：每个 Transformer 只用 1 encoder layer
+  nhead_fh: 8                 # 192/8=24 per head ✓
+  nhead_ht: 8                 # 192/8=24 per head ✓
+  nhead_tf: 4                 # 48/4=12 per head ✓
+  dim_feedforward: 512
+  dropout: 0.1
+  num_pitches: 48             # MIDI 36~83（C2~B5），论文通过 ref22 确认
+
+training:
+  batch_size: 16              # 论文 Section 3.3
+  num_workers: 4
+  learning_rate: 0.0003       # 论文 Section 3.3：lr = 3e-4
+  epochs: 1300                # 由 Fig.4 推算：160k iters / ~125 steps/epoch ≈ 1280
+  run_dir: './run'
+  save_every: 50
+  grad_clip: 1.0              # 论文未提及，工程稳定性保留
+  warmup_epochs: 0            # 论文未提及 warmup
+
+loss:
+  onset_weight: 1.0           # 论文公式(1)：均等权重
+  offset_weight: 1.0
+  frame_weight: 1.0
