@@ -192,6 +192,92 @@ class HarmonicTokenizer(nn.Module):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# 谐波跨 pitch_class 特征聚合（3rd / 5th / 7th 泛音）
+# ═════════════════════════════════════════════════════════════════════════════
+
+# bins_per_octave=48 下各泛音的 pitch_class 偏移量（精确值）：
+#   3rd  泛音：log₂(3) × 48 mod 48 = 28.07 → 28 bins  ≈ P5 (7 semitones)
+#   5th  泛音：log₂(5) × 48 mod 48 = 15.46 → 15 bins  ≈ M3 (3.9 semitones)
+#   7th  泛音：log₂(7) × 48 mod 48 = 38.65 → 39 bins  ≈ m7 (9.7 semitones)
+_HARMONIC_OFFSETS = [28, 15, 39]   # 3rd, 5th, 7th
+
+
+class HarmonicPitchGather(nn.Module):
+    """
+    显式跨 pitch_class 谐波特征聚合模块（解决 3rd / 5th / 7th 泛音问题）。
+
+    【问题】
+    HT Transformer 对每个 pitch_class f 独立处理，无法感知：
+      - "pitch_class f+28 有强能量（3rd泛音）→ pitch_class f 很可能有基频"
+      - "pitch_class f+15 有强能量（5th泛音）→ pitch_class f 很可能有基频"
+    HT 处理的只是同 pitch_class 跨 octave 关系（2nd/4th 泛音），3/5/7 完全看不到。
+
+    【解决方案：双向显式聚合】
+    对每个 pitch_class f，从六个谐波相关位置聚合特征：
+      正向 (+offset)：从 (f+28)%48, (f+15)%48, (f+39)%48 聚合
+        语义："这些是我的 3rd/5th/7th 泛音位置，它们的能量能辅助判断我的基频是否存在"
+      反向 (-offset)：从 (f-28)%48, (f-15)%48, (f-39)%48 聚合
+        语义："我可能是这些位置的 3rd/5th/7th 泛音，从基频位置看反向确认"
+
+    【设计】
+    - 门控残差（gated residual）：sigmoid gate 让模型决定在哪些 pitch/时刻使用谐波上下文
+      如果某 pitch 位置本身就很确定（基频强），gate 关小，防止谐波噪声干扰
+      如果某 pitch 位置模糊（只有泛音），gate 开大，让谐波上下文来帮助推断
+    - 插入位置：HT → HarmonicPitchGather → TF（每个 cycle 都有一个）
+      HT 已处理完 octave 对齐关系，特征稳定后再做跨 pitch 聚合效果最好
+    - 循环 pitch 索引：(f + offset) % 48，正确处理音高的循环周期性
+    """
+    def __init__(self, H: int, F: int = 48,
+                 harmonic_offsets: list = None):
+        super().__init__()
+        if harmonic_offsets is None:
+            harmonic_offsets = _HARMONIC_OFFSETS   # [28, 15, 39]
+
+        # 双向：正向（基频→泛音方向）+ 反向（泛音→基频方向）
+        all_offsets = harmonic_offsets + [-o for o in harmonic_offsets]
+        self.n_offsets = len(all_offsets)   # 6
+
+        # 聚合投影：将 6 个谐波位置的 H 维特征压缩回 H 维
+        # bias=False：避免 over-fitting，门控已足够调节强度
+        self.gather_proj = nn.Linear(H * self.n_offsets, H, bias=False)
+
+        # 门控：基于当前位置自身特征，决定谐波上下文的使用强度（per-channel）
+        self.gate_proj = nn.Linear(H, H)
+
+        self.norm = nn.LayerNorm(H)
+
+        # 预计算循环索引（固定，非可学）
+        # gather_idx[i, f] = (f + all_offsets[i]) % F
+        F_idx = torch.arange(F)
+        gather_idx = torch.stack(
+            [(F_idx + offset) % F for offset in all_offsets],
+            dim=0
+        )   # (n_offsets=6, F=48)
+        self.register_buffer('gather_idx', gather_idx)
+
+    def forward(self, S: torch.Tensor) -> torch.Tensor:
+        """
+        S: (B, T, F=48, H=192) → (B, T, F, H)
+
+        每个 pitch_class f 从 6 个谐波相关位置聚合特征，
+        通过门控残差注入当前表示。
+        """
+        B, T, F, H = S.shape
+
+        # 从 6 个谐波相关 pitch_class 位置聚合特征
+        # gather_idx[i]: (F,) 每个 f 对应的第 i 个谐波位置索引
+        gathered = [S[:, :, self.gather_idx[i], :]      # (B, T, F, H)
+                    for i in range(self.n_offsets)]
+        ctx = torch.cat(gathered, dim=-1)               # (B, T, F, H*6)
+        ctx = self.gather_proj(ctx)                     # (B, T, F, H)
+
+        # 门控：sigmoid(Linear(S)) → per-channel 调节谐波上下文强度
+        gate = torch.sigmoid(self.gate_proj(S))         # (B, T, F, H)
+
+        return self.norm(S + gate * ctx)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # 序列内部位置编码（用于 Transformer 内部序列顺序编码）
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -378,19 +464,28 @@ class TFTransformer(nn.Module):
 
 class CFT_v6(nn.Module):
     """
-    CFT v9（谐波结构修复版）。
+    CFT v10_claude（完整谐波感知版）。
 
     数据流：
       x: (B, 288, T)
-      → HarmonicTokenizer → S: (B, T, 48, H=192)  [H=6 octaves×32 channels，octave结构显式保留]
-      → 循环 M 次：FHTransformer → HTTransformer → TFTransformer
-      → mean(dim=-1) → (B, T, 48)  [GAP 沿 H 轴]
+      → HarmonicTokenizer → S: (B, T, 48, H=192)
+      → 循环 M 次：
+          FHTransformer          # 跨 pitch_class 注意力（含 FH 隐式学习）
+          HTTransformer          # 同 pitch_class 跨 octave（2nd/4th 泛音）
+          HarmonicPitchGather    # 显式跨 pitch_class 聚合（3rd/5th/7th 泛音）← 新增
+          TFTransformer          # 时间-频率依赖精化
+      → mean(dim=-1) → (B, T, 48)   [GAP 沿 H 轴]
       → onset/frame/offset head → (B, T, 48)
 
-    【v9 关键改动】
-    - H=192 = n_octaves(6) × conv_channels(32)，不再使用 Linear 降维到 128
-    - H 维度保留显式 octave 结构：H[k*32:(k+1)*32] = octave_k 的特征
-    - 对应 config.yaml: h_dim=192, nhead_fh=8, nhead_ht=8, nhead_tf=4
+    【谐波覆盖范围】
+      HarmonicTokenizer (3D conv, octave kernel=4):
+        同 pitch_class 跨 octave → 2nd (×2), 4th (×4), 8th (×8) 泛音
+      HTTransformer (d_model=H=192, 每 pitch_class 独立):
+        时间维度上精化同 pitch_class 的 octave 特征关联
+      HarmonicPitchGather (新增，显式 ±offset 聚合):
+        3rd 泛音：pitch_class ±28 bins (log₂3×48 mod 48 ≈ 28, ≈P5 七声)
+        5th 泛音：pitch_class ±15 bins (log₂5×48 mod 48 ≈ 15, ≈M3 大三度)
+        7th 泛音：pitch_class ±39 bins (log₂7×48 mod 48 ≈ 39, ≈m7 小七度)
     """
     def __init__(self, cfg: dict):
         super().__init__()
@@ -456,6 +551,12 @@ class CFT_v6(nn.Module):
             for _ in range(self.num_cycles)
         ])
 
+        # 显式 3rd/5th/7th 泛音跨 pitch_class 聚合（每个 cycle 一个，在 HT→TF 之间）
+        self.harm_gather = nn.ModuleList([
+            HarmonicPitchGather(self.H, self.F_token)
+            for _ in range(self.num_cycles)
+        ])
+
         # 输出头（论文 Fig.2：GAP 沿 H 轴 + Linear）
         # GAP 后维度为 F=48，Linear(48, 48) 学习 pitch class → pitch range 映射
         self.onset_head  = nn.Linear(self.F_token, self.num_pitches)
@@ -470,11 +571,12 @@ class CFT_v6(nn.Module):
         # 1. Tokenization → S: (B, T, 48, H)
         S = self.tokenizer(x)
 
-        # 2. CFT 循环：FH → HT → TF（循环 M 次）
+        # 2. CFT 循环：FH → HT → HarmonicGather → TF（循环 M 次）
         for m_idx in range(self.num_cycles):
-            S = self.fh_transformers[m_idx](S)   # 建立时间-频率依赖
-            S = self.ht_transformers[m_idx](S)   # 建立谐波-时间依赖（最关键）
-            S = self.tf_transformers[m_idx](S)   # 建立时间-频率依赖
+            S = self.fh_transformers[m_idx](S)    # 跨 pitch_class 注意力（FH）
+            S = self.ht_transformers[m_idx](S)    # 同 pitch_class octave 关系（HT）
+            S = self.harm_gather[m_idx](S)        # 显式 3rd/5th/7th 跨 pitch 聚合
+            S = self.tf_transformers[m_idx](S)    # 时间-频率精化（TF）
 
         # 3. GAP 沿 H 轴（论文 Section 2.1）
         out = S.mean(dim=-1)    # (B, T, 48)

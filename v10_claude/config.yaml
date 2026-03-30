@@ -2,6 +2,13 @@
 # ============================================================
 # 论文对齐清单（CFH-Transformer, ICASSP 2023）
 #
+# 【v10_claude 新增模块：HarmonicPitchGather】
+# 问题：3rd/5th/7th 泛音落在不同 pitch_class，HT Transformer 无法感知
+# 解决：在每个 CFT cycle 的 HT→TF 之间插入显式跨 pitch 聚合：
+#   - 对每个 pitch_class f，聚合 (f±28)%48, (f±15)%48, (f±39)%48 的特征
+#   - 门控残差：让模型决定用多少谐波上下文
+#   - 这是架构增强，不影响论文核心设计
+#
 # ✅ 论文明确说明（已对齐）：
 #   - 288-bin CQT，G1~F7，6 octaves × 48 bins/octave  (Section 3.3)
 #   - hop_length=320, sample_rate=16000               (Section 3.3)
